@@ -16,7 +16,7 @@ n_subjects = 2
 from nilearn import datasets
 data_files = datasets.fetch_haxby(n_subjects=n_subjects, fetch_stimuli=True)
 
-### Do first similarity analysis for all subjects in subjects list ##########
+### Do analysis for all subjects in subjects list ##########
 subject_ids = [1]
 
 # Load nilearn NiftiMasker, the practical masking and unmasking tool
@@ -43,16 +43,18 @@ for subject_id in subject_ids:
 
     # Make a data splitting object for cross validation
     from sklearn.cross_validation import LeaveOneLabelOut
-    cv = LeaveOneLabelOut(session_labels)
+    outer_cv = LeaveOneLabelOut(session_labels)
 
     from sklearn.svm import SVC
     from sklearn.multiclass import OneVsRestClassifier
     from sklearn.cross_validation import cross_val_score
-    classifier = OneVsRestClassifier(SVC(C=.1, kernel="linear"))
+    # classifier = OneVsRestClassifier(SVC(C=.1, kernel="linear"))
 
 
     mask_names = ['mask_vt', 'mask_face', 'mask_face_little',
                   'mask_house', 'mask_house_little']
+
+    classifier_penalties = np.logspace(-3, 3, 7)
 
     mask_scores = {}
     for mask_name in mask_names:
@@ -67,18 +69,28 @@ for subject_id in subject_ids:
             print "Treating %s %s" % (mask_name, label)
             classification_target = \
                 labels['labels'][resting_state == False] == label
-            mask_scores[mask_name][label] = cross_val_score(
-                classifier, 
-                masked_timecourses,
-                classification_target,
-                cv=cv,
-                n_jobs=1,
-                verbose=True,
-                scoring="f1")
+            mask_scores[mask_name][label] = {}
+            for i, (train, test) in enumerate(outer_cv):
+                train_data = masked_timecourses[train]
+                train_targets = classification_target[train]
+                remaining_labels = session_labels[train]
+                inner_cv = LeaveOneLabelOut(remaining_labels)
+                mask_scores[mask_name][label][i] = {}
+                for C in classifier_penalties:
+                    print "Treating %s %s fold %d penalty %1.2f" % (
+                        mask_name, label, i, C)
+                    mask_scores[mask_name][label][i][C] = cross_val_score(
+                        SVC(C=C), 
+                        masked_timecourses,
+                        classification_target,
+                        cv=inner_cv,
+                        n_jobs=1,
+                        verbose=True,
+                        scoring="f1")
 
-            print "Scores: %1.2f +- %1.2f" % (
-                mask_scores[mask_name][label].mean(),
-                mask_scores[mask_name][label].std())
+                    print "Scores: %1.2f +- %1.2f" % (
+                        mask_scores[mask_name][label][i][C].mean(),
+                        mask_scores[mask_name][label][i][C].std())
 
     # make a rudimentary diagram
     import matplotlib.pyplot as plt
