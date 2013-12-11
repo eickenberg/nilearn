@@ -46,9 +46,9 @@ for subject_id in subject_ids:
     cv = LeaveOneLabelOut(session_labels)
 
     from sklearn.svm import SVC
-    from sklearn.multiclass import OneVsRestClassifier
+    from sklearn.multiclass import OneVsOneClassifier
     from sklearn.cross_validation import cross_val_score
-    classifier = OneVsRestClassifier(SVC(C=.1, kernel="linear"))
+    classifier = SVC(C=10, kernel="linear")
 
 
     mask_names = ['mask_vt', 'mask_face', 'mask_face_little',
@@ -64,32 +64,41 @@ for subject_id in subject_ids:
         mask_scores[mask_name] = {}
 
         for label in unique_labels:
-            print "Treating %s %s" % (mask_name, label)
-            classification_target = \
-                labels['labels'][resting_state == False] == label
-            mask_scores[mask_name][label] = cross_val_score(
-                classifier, 
-                masked_timecourses,
-                classification_target,
-                cv=cv,
-                n_jobs=1,
-                verbose=True,
-                scoring="f1")
+            mask_scores[mask_name][label] = {}
+            for label2 in unique_labels:
+                if label == label2:
+                    mask_scores[mask_name][label][label2] = np.array([0.])
+                    continue
+                else:
+                    print "Treating %s %s vs %s" % (mask_name, label, label2)
+                    reduce_targets = np.array([l in [label, label2]
+                        for l in labels['labels']])
+                    mask_scores[mask_name][label][label2] = cross_val_score(
+                        classifier, 
+                        masked_timecourses[
+                            reduce_targets[resting_state==False]],
+                        labels['labels'][reduce_targets],
+                        cv=12,
+                        n_jobs=1,
+                        verbose=True)
 
-            print "Scores: %1.2f +- %1.2f" % (
-                mask_scores[mask_name][label].mean(),
-                mask_scores[mask_name][label].std())
+                    print "Scores: %1.2f +- %1.2f" % (
+                        mask_scores[mask_name][label][label2].mean(),
+                        mask_scores[mask_name][label][label2].std())
 
     # make a rudimentary diagram
     import matplotlib.pyplot as plt
-    score_means = np.array([[mask_scores[mask_name][label].mean()
-                for label in unique_labels] 
+    score_means = np.array([[[mask_scores[mask_name][label][label2].mean()
+                for label2 in unique_labels]
+                for label in unique_labels]
                 for mask_name in mask_names])
-    plt.matshow(score_means)
-    plt.xticks(range(len(unique_labels)), unique_labels, rotation=90)
-    plt.yticks(range(len(mask_names)), mask_names)
-    plt.colorbar()
-    plt.hot()
+    for i, mask_name in enumerate(mask_names):
+        plt.figure()
+        plt.imshow(score_means[i], interpolation="nearest", 
+                   vmin=0.5, vmax=1.0)
+        plt.xticks(range(len(unique_labels)), unique_labels, rotation=90)
+        plt.yticks(range(len(unique_labels)), unique_labels)
+        plt.title(mask_name)
+        plt.colorbar()
+        plt.hot()
     plt.show()
-
-
