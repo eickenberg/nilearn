@@ -2,81 +2,59 @@
 Machine Learning module for NeuroImaging in python
 ==================================================
 
-NiLearn aims to simplify the use of the scikit-learn in the context of
-neuroimaging. It provides specific input/output functions, algorithms and
-visualisation tools.
+Documentation is available in the docstrings and online at
+http://nilearn.github.io.
 
-See http://nilearn.github.com for complete documentation.
+Contents
+--------
+Nilearn aims at simplifying the use of the scikit-learn package in the context of
+neuroimaging. It provides specific input/output functions, algorithms and
+visualization tools.
+
+Submodules
+---------
+datasets                --- Utilities to download NeuroImaging datasets
+decoding                --- Decoding tools and algorithms
+decomposition           --- Includes a subject level variant of the ICA
+                            algorithm called Canonical ICA
+connectome              --- Set of tools for computing functional connectivity matrices
+                            and for sparse multi-subjects learning of Gaussian graphical models
+image                   --- Set of functions defining mathematical operations
+                            working on Niimg-like objects
+input_data              --- includes scikit-learn tranformers and tools to
+                            preprocess neuro-imaging data
+masking                 --- Utilities to compute and operate on brain masks
+mass_univariate         --- Defines a Massively Univariate Linear Model
+                            estimated with OLS and permutation test
+plotting                --- Plotting code for nilearn
+region                  --- Set of functions for extracting region-defined
+                            signals
+signal                  --- Set of preprocessing functions for time series
 """
 
-__version__ = "0.1a"
+import gzip
 
-def _check_dependencies():
-    from distutils.version import LooseVersion
-    try:
-        import numpy
-    except ImportError:
-        print('Numpy could not be found,'
-              ' please install it properly to use nilearn.')
-    if not LooseVersion(numpy.__version__) >= LooseVersion('1.6.0'):
-        raise ImportError('A numpy version of at least 1.6 is required '
-            'to use nilearn. %s was found. Please upgrade numpy.'
-            % numpy.__version__
-            )
+from .version import _check_module_dependencies, __version__
 
-    try:
-        import scipy
-    except ImportError:
-        print('Scipy could not be found,'
-              ' please install it properly to use nilearn.')
-    if not LooseVersion(scipy.__version__) >= LooseVersion('0.9.0'):
-        raise ImportError('A scipy version of at least 0.9 is required '
-            'to use nilearn. %s was found. Please upgrade scipy.'
-            % scipy.__version__
-            )
+_check_module_dependencies()
 
-    try:
-        import sklearn
-    except ImportError:
-        print('Scikit-learn could not be found,'
-              ' please install it properly to use nilearn.')
-    if not LooseVersion(sklearn.__version__) >= LooseVersion('0.10'):
-        raise ImportError('A scikit-learn version of at least 0.10 is required'
-            ' to use nilearn. %s was found. Please upgrade scikit-learn.'
-            % sklearn.__version__
-            )
+# Monkey-patch gzip to have faster reads on large gzip files
+if hasattr(gzip.GzipFile, 'max_read_chunk'):
+    gzip.GzipFile.max_read_chunk = 100 * 1024 * 1024  # 100Mb
 
+# Boolean controlling the default globbing technique when using check_niimg
+# Default value it True, set it to False to completely deactivate use of glob
+# module
+EXPAND_PATH_WILDCARDS = True
 
-    try:
-        import nibabel
-    except ImportError:
-        print('nibabel could not be found,'
-              ' please install it properly to use nilearn.')
-    try:
-        import gzip
-        if hasattr(gzip.GzipFile, 'max_read_chunk'):
-            # Monkey-patch gzip to have faster reads on large
-            # gzip files
-            gzip.GzipFile.max_read_chunk = 100 * 1024 * 1024 # 100Mb
-    except ImportError:
-        print('Python has been compiled without gzip,'
-              ' reading nii.gz files will be impossible.')
-    if not LooseVersion(nibabel.__version__) >= LooseVersion('1.1.0'):
-        raise ImportError('A nibabel version of at least 1.1 is required'
-            ' to use nilearn. %s was found. Please upgrade nibabel.'
-            % nibabel.__version__
-            )
-
-
-_check_dependencies()
-
-
-del _check_dependencies
-
-# Boolean controling whether the joblib caches should be
+# Boolean controlling whether the joblib caches should be
 # flushed if the version of certain modules changes (eg nibabel, as it
 # does not respect the backward compatibility in some of its internal
 # structures
 # This  is used in nilearn._utils.cache_mixin
-check_cache_version = True
+CHECK_CACHE_VERSION = True
 
+# list all submodules available in nilearn and version
+__all__ = ['datasets', 'decoding', 'decomposition', 'connectome',
+           'image', 'input_data', 'masking', 'mass_univariate', 'plotting',
+           'region', 'signal', '__version__']

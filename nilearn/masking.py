@@ -1,5 +1,5 @@
 """
-Utilities to compute a brain mask from EPI images
+Utilities to compute and operate on brain masks
 """
 # Author: Gael Varoquaux, Alexandre Abraham, Philippe Gervais
 # License: simplified BSD
@@ -7,13 +7,13 @@ import warnings
 
 import numpy as np
 from scipy import ndimage
-from nibabel import Nifti1Image
 from sklearn.externals.joblib import Parallel, delayed
 
 from . import _utils
+from .image import new_img_like
 from ._utils.cache_mixin import cache
-from ._utils.ndimage import largest_connected_component
-from ._utils.niimg_conversions import _safe_get_data
+from ._utils.ndimage import largest_connected_component, get_border_data
+from ._utils.niimg import _safe_get_data
 
 
 class MaskWarning(UserWarning):
@@ -24,11 +24,12 @@ warnings.simplefilter("always", MaskWarning)
 
 
 def _load_mask_img(mask_img, allow_empty=False):
-    ''' Check that a mask is valid, ie with two values including 0 and load it.
+    """Check that a mask is valid, ie with two values including 0 and load it.
 
     Parameters
     ----------
-    mask_img: nifti-like image
+    mask_img: Niimg-like object
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         The mask to check
 
     allow_empty: boolean, optional
@@ -38,15 +39,16 @@ def _load_mask_img(mask_img, allow_empty=False):
     -------
     mask: numpy.ndarray
         boolean version of the mask
-    '''
-    mask_img = _utils.check_niimg(mask_img)
+    """
+    mask_img = _utils.check_niimg_3d(mask_img)
     mask = mask_img.get_data()
     values = np.unique(mask)
 
     if len(values) == 1:
         # We accept a single value if it is not 0 (full true mask).
         if values[0] == 0 and not allow_empty:
-            raise ValueError('Given mask is invalid because it masks all data')
+            raise ValueError(
+                'The mask is invalid as it is empty: it masks all data.')
     elif len(values) == 2:
         # If there are 2 different values, one of them must be 0 (background)
         if not 0 in values:
@@ -72,7 +74,7 @@ def _extrapolate_out_mask(data, mask, iterations=1):
     larger_mask = np.zeros(np.array(mask.shape) + 2, dtype=np.bool)
     larger_mask[1:-1, 1:-1, 1:-1] = mask
     # Use nans as missing value: ugly
-    masked_data = np.zeros(larger_mask.shape)
+    masked_data = np.zeros(larger_mask.shape + data.shape[3:])
     masked_data[1:-1, 1:-1, 1:-1] = data.copy()
     masked_data[np.logical_not(larger_mask)] = np.nan
     outer_shell = larger_mask.copy()
@@ -108,7 +110,8 @@ def intersect_masks(mask_imgs, threshold=0.5, connected=True):
 
     Parameters
     ----------
-    masks_imgs: list of 3D nifti-like images
+    mask_imgs: list of Niimg-like objects
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         3D individual masks with same shape and affine.
 
     threshold: float, optional
@@ -121,7 +124,7 @@ def intersect_masks(mask_imgs, threshold=0.5, connected=True):
 
     Returns
     -------
-        grp_mask: 3D nifti-like image
+        grp_mask: 3D nibabel.Nifti1Image
             intersection of all masks.
     """
     if len(mask_imgs) == 0:
@@ -157,24 +160,24 @@ def intersect_masks(mask_imgs, threshold=0.5, connected=True):
     if np.any(grp_mask > 0) and connected:
         grp_mask = largest_connected_component(grp_mask)
     grp_mask = _utils.as_ndarray(grp_mask, dtype=np.int8)
-    return Nifti1Image(grp_mask, ref_affine)
+    return new_img_like(_utils.check_niimg_3d(mask_imgs[0]), grp_mask, ref_affine)
 
 
-def _post_process_mask(mask, affine, opening=2, connected=True, msg=""):
+def _post_process_mask(mask, affine, opening=2, connected=True,
+                       warning_msg=""):
     if opening:
         opening = int(opening)
         mask = ndimage.binary_erosion(mask, iterations=opening)
     mask_any = mask.any()
     if not mask_any:
-        warnings.warn("Computed an empty mask. %s" % msg,
+        warnings.warn("Computed an empty mask. %s" % warning_msg,
             MaskWarning, stacklevel=2)
     if connected and mask_any:
         mask = largest_connected_component(mask)
     if opening:
-        mask = ndimage.binary_dilation(mask, iterations=2*opening)
+        mask = ndimage.binary_dilation(mask, iterations=2 * opening)
         mask = ndimage.binary_erosion(mask, iterations=opening)
-    return Nifti1Image(_utils.as_ndarray(mask, dtype=np.int8),
-                       affine)
+    return mask, affine
 
 
 def compute_epi_mask(epi_img, lower_cutoff=0.2, upper_cutoff=0.85,
@@ -182,8 +185,7 @@ def compute_epi_mask(epi_img, lower_cutoff=0.2, upper_cutoff=0.85,
                      ensure_finite=True,
                      target_affine=None, target_shape=None,
                      memory=None, verbose=0,):
-    """
-    Compute a brain mask from fMRI data in 3D or 4D ndarrays.
+    """Compute a brain mask from fMRI data in 3D or 4D ndarrays.
 
     This is based on an heuristic proposed by T.Nichols:
     find the least dense point of the histogram, between fractions
@@ -193,7 +195,8 @@ def compute_epi_mask(epi_img, lower_cutoff=0.2, upper_cutoff=0.85,
 
     Parameters
     ----------
-    epi_img: nifti-like image
+    epi_img: Niimg-like object
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         EPI image, used to compute the mask. 3D and 4D images are accepted.
         If a 3D image is given, we suggest to use the mean image
 
@@ -249,9 +252,7 @@ def compute_epi_mask(epi_img, lower_cutoff=0.2, upper_cutoff=0.85,
         The brain mask (3D image)
     """
     if verbose > 0:
-        print "EPI mask computation"
-    # We suppose that it is a niimg
-    # XXX make a is_a_niimgs function ?
+        print("EPI mask computation")
 
     # Delayed import to avoid circular imports
     from .image.image import _compute_mean
@@ -261,6 +262,8 @@ def compute_epi_mask(epi_img, lower_cutoff=0.2, upper_cutoff=0.85,
                                      smooth=(1 if opening else False))
 
     if ensure_finite:
+        # Get rid of memmapping
+        mean_epi = _utils.as_ndarray(mean_epi)
         # SPM tends to put NaNs in the data outside the brain
         mean_epi[np.logical_not(np.isfinite(mean_epi))] = 0
     sorted_input = np.sort(np.ravel(mean_epi))
@@ -278,9 +281,10 @@ def compute_epi_mask(epi_img, lower_cutoff=0.2, upper_cutoff=0.85,
 
     mask = mean_epi >= threshold
 
-    return _post_process_mask(mask, affine, opening=opening,
-        connected=connected, msg="Are you sure that input "
+    mask, affine = _post_process_mask(mask, affine, opening=opening,
+        connected=connected, warning_msg="Are you sure that input "
             "data are EPI images not detrended. ")
+    return new_img_like(epi_img, mask, affine)
 
 
 def compute_multi_epi_mask(epi_imgs, lower_cutoff=0.2, upper_cutoff=0.85,
@@ -296,7 +300,8 @@ def compute_multi_epi_mask(epi_imgs, lower_cutoff=0.2, upper_cutoff=0.85,
 
     Parameters
     ----------
-    epi_imgs: list of Niimgs
+    epi_imgs: list of Niimg-like objects
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         A list of arrays, each item being a subject or a session.
         3D and 4D images are accepted.
         If 3D images is given, we suggest to use the mean image of each
@@ -340,7 +345,7 @@ def compute_multi_epi_mask(epi_imgs, lower_cutoff=0.2, upper_cutoff=0.85,
 
     Returns
     -------
-    mask : 3D nifti-like image
+    mask : 3D nibabel.Nifti1Image
         The brain mask.
     """
     if len(epi_imgs) == 0:
@@ -371,7 +376,8 @@ def compute_background_mask(data_imgs, border_size=2,
 
     Parameters
     ----------
-    data_imgs: nifti-like image
+    data_imgs: Niimg-like object
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         Images used to compute the mask. 3D and 4D images are accepted.
         If a 3D image is given, we suggest to use the mean image
 
@@ -411,9 +417,9 @@ def compute_background_mask(data_imgs, border_size=2,
         The brain mask (3D image)
     """
     if verbose > 0:
-        print "Background mask computation"
-    # We suppose that it is a niimg
-    # XXX make a is_a_niimgs function ?
+        print("Background mask computation")
+
+    data_imgs = _utils.check_niimg(data_imgs)
 
     # Delayed import to avoid circular imports
     from .image.image import _compute_mean
@@ -421,12 +427,7 @@ def compute_background_mask(data_imgs, border_size=2,
                 target_affine=target_affine, target_shape=target_shape,
                 smooth=False)
 
-    border_data = np.concatenate([
-            data[:border_size, :, :].ravel(), data[-border_size:, :, :].ravel(),
-            data[:, :border_size, :].ravel(), data[:, -border_size:, :].ravel(),
-            data[:, :, :border_size].ravel(), data[:, :, -border_size:].ravel(),
-        ])
-    background = np.median(border_data)
+    background = np.median(get_border_data(data, border_size))
     if np.isnan(background):
         # We absolutely need to catter for NaNs as a background:
         # SPM does that by default
@@ -434,9 +435,10 @@ def compute_background_mask(data_imgs, border_size=2,
     else:
         mask = data != background
 
-    return _post_process_mask(mask, affine, opening=opening,
-        connected=connected, msg="Are you sure that input "
+    mask, affine = _post_process_mask(mask, affine, opening=opening,
+        connected=connected, warning_msg="Are you sure that input "
             "images have a homogeneous background.")
+    return new_img_like(data_imgs, mask, affine)
 
 
 def compute_multi_background_mask(data_imgs, border_size=2, upper_cutoff=0.85,
@@ -452,7 +454,8 @@ def compute_multi_background_mask(data_imgs, border_size=2, upper_cutoff=0.85,
 
     Parameters
     ----------
-    data_imgs: list of Niimgs
+    data_imgs: list of Niimg-like objects
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         A list of arrays, each item being a subject or a session.
         3D and 4D images are accepted.
         If 3D images is given, we suggest to use the mean image of each
@@ -489,7 +492,7 @@ def compute_multi_background_mask(data_imgs, border_size=2, upper_cutoff=0.85,
 
     Returns
     -------
-    mask : 3D nifti-like image
+    mask : 3D nibabel.Nifti1Image
         The brain mask.
     """
     if len(data_imgs) == 0:
@@ -513,19 +516,20 @@ def compute_multi_background_mask(data_imgs, border_size=2, upper_cutoff=0.85,
 # Time series extraction
 #
 
-def apply_mask(niimgs, mask_img, dtype='f',
+def apply_mask(imgs, mask_img, dtype='f',
                smoothing_fwhm=None, ensure_finite=True):
     """Extract signals from images using specified mask.
 
-    Read the time series from the given nifti images or filepaths,
-    using the mask.
+    Read the time series from the given Niimg-like object, using the mask.
 
     Parameters
     -----------
-    niimgs: list of 4D nifti images
+    imgs: list of 4D Niimg-like objects
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         Images to be masked. list of lists of 3D images are also accepted.
 
-    mask_img: niimg
+    mask_img: Niimg-like object
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         3D mask array: True where a voxel should be used.
 
     dtype: numpy dtype or 'f'
@@ -551,15 +555,15 @@ def apply_mask(niimgs, mask_img, dtype='f',
     When using smoothing, ensure_finite is set to True, as non-finite
     values would spread accross the image.
     """
+    mask_img = _utils.check_niimg_3d(mask_img)
     mask, mask_affine = _load_mask_img(mask_img)
-    mask_img = Nifti1Image(_utils.as_ndarray(mask, dtype=np.int8),
-                           mask_affine)
-    return _apply_mask_fmri(niimgs, mask_img, dtype=dtype,
+    mask_img = new_img_like(mask_img, mask, mask_affine)
+    return _apply_mask_fmri(imgs, mask_img, dtype=dtype,
                             smoothing_fwhm=smoothing_fwhm,
                             ensure_finite=ensure_finite)
 
 
-def _apply_mask_fmri(niimgs, mask_img, dtype='f',
+def _apply_mask_fmri(imgs, mask_img, dtype='f',
                      smoothing_fwhm=None, ensure_finite=True):
     """Same as apply_mask().
 
@@ -568,7 +572,7 @@ def _apply_mask_fmri(niimgs, mask_img, dtype='f',
     values (this is checked for in apply_mask, not in this function).
     """
 
-    mask_img = _utils.check_niimg(mask_img)
+    mask_img = _utils.check_niimg_3d(mask_img)
     mask_affine = mask_img.get_affine()
     mask_data = _utils.as_ndarray(mask_img.get_data(),
                                   dtype=np.bool)
@@ -576,22 +580,22 @@ def _apply_mask_fmri(niimgs, mask_img, dtype='f',
     if smoothing_fwhm is not None:
         ensure_finite = True
 
-    niimgs_img = _utils.check_niimgs(niimgs)
-    affine = niimgs_img.get_affine()[:3, :3]
+    imgs_img = _utils.check_niimg(imgs)
+    affine = imgs_img.get_affine()[:3, :3]
 
-    if not np.allclose(mask_affine, niimgs_img.get_affine()):
+    if not np.allclose(mask_affine, imgs_img.get_affine()):
         raise ValueError('Mask affine: \n%s\n is different from img affine:'
                          '\n%s' % (str(mask_affine),
-                                   str(niimgs_img.get_affine())))
+                                   str(imgs_img.get_affine())))
 
-    if not mask_data.shape == niimgs_img.shape[:3]:
+    if not mask_data.shape == imgs_img.shape[:3]:
         raise ValueError('Mask shape: %s is different from img shape:%s'
-                         % (str(mask_data.shape), str(niimgs_img.shape[:3])))
+                         % (str(mask_data.shape), str(imgs_img.shape[:3])))
 
     # All the following has been optimized for C order.
     # Time that may be lost in conversion here is regained multiple times
     # afterward, especially if smoothing is applied.
-    series = _safe_get_data(niimgs_img)
+    series = _safe_get_data(imgs_img)
 
     if dtype == 'f':
         if series.dtype.kind == 'f':
@@ -600,7 +604,7 @@ def _apply_mask_fmri(niimgs, mask_img, dtype='f',
             dtype = np.float32
     series = _utils.as_ndarray(series, dtype=dtype, order="C",
                                copy=True)
-    del niimgs_img  # frees a lot of memory
+    del imgs_img  # frees a lot of memory
 
     # Delayed import to avoid circular imports
     from .image.image import _smooth_array
@@ -615,16 +619,20 @@ def _unmask_3d(X, mask, order="C"):
     Parameters
     ==========
     X: numpy.ndarray
-        Masked data. shape: (samples,)
+        Masked data. shape: (features,)
 
-    mask: numpy.ndarray
+    mask: Niimg-like object
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
         Mask. mask.ndim must be equal to 3, and dtype *must* be bool.
     """
 
     if mask.dtype != np.bool:
-        raise ValueError("mask must be a boolean array")
+        raise TypeError("mask must be a boolean array")
     if X.ndim != 1:
-        raise ValueError("X must be a 1-dimensional array")
+        raise TypeError("X must be a 1-dimensional array")
+    n_features = mask.sum()
+    if X.shape[0] != n_features:
+        raise TypeError('X must be of shape (samples, %d).' % n_features)
 
     data = np.zeros(
         (mask.shape[0], mask.shape[1], mask.shape[2]),
@@ -633,8 +641,8 @@ def _unmask_3d(X, mask, order="C"):
     return data
 
 
-def _unmask_nd(X, mask, order="C"):
-    """Take masked data and bring them back to n-dimension
+def _unmask_4d(X, mask, order="C"):
+    """Take masked data and bring them back to 4D.
 
     Parameters
     ==========
@@ -642,7 +650,7 @@ def _unmask_nd(X, mask, order="C"):
         Masked data. shape: (samples, features)
 
     mask: numpy.ndarray
-        Mask. mask.ndim must be equal to 3, and dtype equal to bool.
+        Mask. mask.ndim must be equal to 4, and dtype *must* be bool.
 
     Returns
     =======
@@ -652,9 +660,12 @@ def _unmask_nd(X, mask, order="C"):
     """
 
     if mask.dtype != np.bool:
-        raise ValueError("mask must be a boolean array")
+        raise TypeError("mask must be a boolean array")
     if X.ndim != 2:
-        raise ValueError("X must be a 2-dimensional array")
+        raise TypeError("X must be a 2-dimensional array")
+    n_features = mask.sum()
+    if X.shape[1] != n_features:
+        raise TypeError('X must be of shape (samples, %d).' % n_features)
 
     data = np.zeros(mask.shape + (X.shape[0],), dtype=X.dtype, order=order)
     data[mask, :] = X.T
@@ -671,12 +682,13 @@ def unmask(X, mask_img, order="F"):
     X: numpy.ndarray (or list of)
         Masked data. shape: (samples #, features #).
         If X is one-dimensional, it is assumed that samples# == 1.
-    mask_img: nifti-like image
-        Mask. Must be 3-dimensional.
+    mask_img: niimg: Niimg-like object
+        See http://nilearn.github.io/manipulating_visualizing/manipulating_images.html#niimg.
+        Must be 3-dimensional.
 
     Returns
     =======
-    data: nifti-like image (or list of)
+    data: nibabel.Nift1Image object
         Unmasked data. Depending on the shape of X, data can have
         different shapes:
 
@@ -692,15 +704,15 @@ def unmask(X, mask_img, order="F"):
             ret.append(unmask(x, mask_img, order=order))  # 1-level recursion
         return ret
 
+    mask_img = _utils.check_niimg_3d(mask_img)
     mask, affine = _load_mask_img(mask_img)
 
     if X.ndim == 2:
-        unmasked = _unmask_nd(X, mask, order=order)
+        unmasked = _unmask_4d(X, mask, order=order)
     elif X.ndim == 1:
         unmasked = _unmask_3d(X, mask, order=order)
     else:
-        raise TypeError(
-            "Masked data X must be 2D or 1D array; got shape: %s" % str(
-                X.shape))
+        raise TypeError("Masked data X must be 2D or 1D array; "
+                        "got shape: %s" % str(X.shape))
 
-    return Nifti1Image(unmasked, affine)
+    return new_img_like(mask_img, unmasked, affine)

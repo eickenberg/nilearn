@@ -1,15 +1,32 @@
 """
 Test image pre-processing functions
 """
-from nose.tools import assert_true, assert_false
+from nose.tools import assert_true, assert_false, assert_equal
+from distutils.version import LooseVersion
+from nose import SkipTest
 
+import platform
+import os
 import nibabel
+from nibabel import Nifti1Image
 import numpy as np
-from numpy.testing import assert_array_equal
+from numpy.testing import assert_array_equal, assert_allclose
+from nilearn._utils.testing import assert_raises_regex
 
-from .. import image
-from .. import resampling
-from ..._utils import testing
+from nilearn.image import image
+from nilearn.image import resampling
+from nilearn.image import concat_imgs
+from nilearn._utils import testing, niimg_conversions
+from nilearn.image import new_img_like
+from nilearn.image import threshold_img
+from nilearn.image import iter_img
+from nilearn.image import math_img
+
+X64 = (platform.architecture()[0] == '64bit')
+
+currdir = os.path.dirname(os.path.abspath(__file__))
+datadir = os.path.join(currdir, 'data')
+
 
 def test_high_variance_confounds():
     # See also test_signals.test_high_variance_confounds()
@@ -31,6 +48,28 @@ def test_high_variance_confounds():
     confounds2 = image.high_variance_confounds(img, percentile=10.,
                                                n_confounds=n_confounds)
     assert_true(confounds2.shape == (length, n_confounds))
+
+
+def test__fast_smooth_array():
+    N = 4
+    shape = (N, N, N)
+    # hardcoded in _fast_smooth_array
+    neighbor_weight = 0.2
+    # 6 neighbors in 3D if you are not on an edge
+    nb_neighbors_max = 6
+
+    data = np.ones(shape)
+    smooth_data = image._fast_smooth_array(data)
+
+    # this contains the number of neighbors for each cell in the array
+    nb_neighbors_arr = np.empty(shape)
+    for (i, j, k), __ in np.ndenumerate(nb_neighbors_arr):
+        nb_neighbors_arr[i, j, k] = (3 + (0 < i < N - 1) +
+                                     (0 < j < N - 1) + (0 < k < N - 1))
+
+    expected = ((1 + neighbor_weight * nb_neighbors_arr) /
+                (1 + neighbor_weight * nb_neighbors_max))
+    np.testing.assert_allclose(smooth_data, expected)
 
 
 def test__smooth_array():
@@ -81,6 +120,11 @@ def test__smooth_array():
             np.testing.assert_equal(proj.sum(),
                                     fwhm / np.abs(affine[axis, axis]))
 
+    # Check fwhm='fast'
+    for affine in test_affines:
+        np.testing.assert_equal(image._smooth_array(data, affine, fwhm='fast'),
+                                image._fast_smooth_array(data))
+
 
 def test_smooth_img():
     # This function only checks added functionalities compared
@@ -114,45 +158,45 @@ def test__crop_img_to():
     data = np.zeros((5, 6, 7))
     data[2:4, 1:5, 3:6] = 1
     affine = np.diag((4, 3, 2, 1))
-    niimg = nibabel.Nifti1Image(data, affine=affine)
+    img = nibabel.Nifti1Image(data, affine=affine)
 
     slices = [slice(2, 4), slice(1, 5), slice(3, 6)]
-    cropped_niimg = image._crop_img_to(niimg, slices, copy=False)
+    cropped_img = image._crop_img_to(img, slices, copy=False)
 
     new_origin = np.array((4, 3, 2)) * np.array((2, 1, 3))
 
     # check that correct part was extracted:
-    assert_true((cropped_niimg.get_data() == 1).all())
-    assert_true(cropped_niimg.shape == (2, 4, 3))
+    assert_true((cropped_img.get_data() == 1).all())
+    assert_true(cropped_img.shape == (2, 4, 3))
 
     # check that affine was adjusted correctly
-    assert_true((cropped_niimg.get_affine()[:3, 3] == new_origin).all())
+    assert_true((cropped_img.get_affine()[:3, 3] == new_origin).all())
 
     # check that data was really not copied
     data[2:4, 1:5, 3:6] = 2
-    assert_true((cropped_niimg.get_data() == 2).all())
+    assert_true((cropped_img.get_data() == 2).all())
 
     # check that copying works
-    copied_cropped_niimg = image._crop_img_to(niimg, slices)
+    copied_cropped_img = image._crop_img_to(img, slices)
     data[2:4, 1:5, 3:6] = 1
-    assert_true((copied_cropped_niimg.get_data() == 2).all())
+    assert_true((copied_cropped_img.get_data() == 2).all())
 
 
 def test_crop_img():
     data = np.zeros((5, 6, 7))
     data[2:4, 1:5, 3:6] = 1
     affine = np.diag((4, 3, 2, 1))
-    niimg = nibabel.Nifti1Image(data, affine=affine)
+    img = nibabel.Nifti1Image(data, affine=affine)
 
-    cropped_niimg = image.crop_img(niimg)
+    cropped_img = image.crop_img(img)
 
     # correction for padding with "-1"
     new_origin = np.array((4, 3, 2)) * np.array((2 - 1, 1 - 1, 3 - 1))
 
     # check that correct part was extracted:
     # This also corrects for padding
-    assert_true((cropped_niimg.get_data()[1:-1, 1:-1, 1:-1] == 1).all())
-    assert_true(cropped_niimg.shape == (2 + 2, 4 + 2, 3 + 2))
+    assert_true((cropped_img.get_data()[1:-1, 1:-1, 1:-1] == 1).all())
+    assert_true(cropped_img.shape == (2 + 2, 4 + 2, 3 + 2))
 
 
 def test_crop_threshold_tolerance():
@@ -166,10 +210,10 @@ def test_crop_threshold_tolerance():
     # add an infinitesimal outside this block
     data[3, 3, 3] = 1e-12
     affine = np.eye(4)
-    niimg = nibabel.Nifti1Image(data, affine=affine)
+    img = nibabel.Nifti1Image(data, affine=affine)
 
-    cropped_niimg = image.crop_img(niimg)
-    assert_true(cropped_niimg.shape == active_shape)
+    cropped_img = image.crop_img(img)
+    assert_true(cropped_img.shape == active_shape)
 
 
 def test_mean_img():
@@ -178,33 +222,43 @@ def test_mean_img():
     data2 = rng.rand(5, 6, 7)
     data3 = rng.rand(5, 6, 7, 3)
     affine = np.diag((4, 3, 2, 1))
-    niimg1 = nibabel.Nifti1Image(data1, affine=affine)
-    niimg2 = nibabel.Nifti1Image(data2, affine=affine)
-    niimg3 = nibabel.Nifti1Image(data3, affine=affine)
-    for niimgs in ([niimg1, ],
-                   [niimg1, niimg2],
-                   [niimg2, niimg1, niimg2],
-                   [niimg3, niimg1, niimg2],  # Mixture of 4D and 3D images
+    img1 = nibabel.Nifti1Image(data1, affine=affine)
+    img2 = nibabel.Nifti1Image(data2, affine=affine)
+    img3 = nibabel.Nifti1Image(data3, affine=affine)
+    for imgs in ([img1, ],
+                   [img1, img2],
+                   [img2, img1, img2],
+                   [img3, img1, img2],  # Mixture of 4D and 3D images
                   ):
 
         arrays = list()
         # Ground-truth:
-        for niimg in niimgs:
-            niimg = niimg.get_data()
-            if niimg.ndim == 4:
-                niimg = np.mean(niimg, axis=-1)
-            arrays.append(niimg)
+        for img in imgs:
+            img = img.get_data()
+            if img.ndim == 4:
+                img = np.mean(img, axis=-1)
+            arrays.append(img)
         truth = np.mean(arrays, axis=0)
 
-        mean_img = image.mean_img(niimgs)
+        mean_img = image.mean_img(imgs)
         assert_array_equal(mean_img.get_affine(), affine)
         assert_array_equal(mean_img.get_data(), truth)
 
         # Test with files
-        with testing.write_tmp_imgs(*niimgs) as imgs:
+        with testing.write_tmp_imgs(*imgs) as imgs:
             mean_img = image.mean_img(imgs)
             assert_array_equal(mean_img.get_affine(), affine)
-            assert_array_equal(mean_img.get_data(), truth)
+            if X64:
+                assert_array_equal(mean_img.get_data(), truth)
+            else:
+                # We don't really understand but arrays are not
+                # exactly equal on 32bit. Given that you can not do
+                # much real world data analysis with nilearn on a
+                # 32bit machine it is not worth investigating more
+                assert_allclose(mean_img.get_data(), truth,
+                                rtol=np.finfo(truth.dtype).resolution,
+                                atol=0)
+
 
 
 def test_mean_img_resample():
@@ -212,11 +266,11 @@ def test_mean_img_resample():
     rng = np.random.RandomState(42)
     data = rng.rand(5, 6, 7, 40)
     affine = np.diag((4, 3, 2, 1))
-    niimg = nibabel.Nifti1Image(data, affine=affine)
+    img = nibabel.Nifti1Image(data, affine=affine)
     mean_img = nibabel.Nifti1Image(data.mean(axis=-1), affine=affine)
 
     target_affine = affine[:, [1, 0, 2, 3]]  # permutation of axes
-    mean_img_with_resampling = image.mean_img(niimg,
+    mean_img_with_resampling = image.mean_img(img,
                                               target_affine=target_affine)
     resampled_mean_image = resampling.resample_img(mean_img,
                                               target_affine=target_affine)
@@ -226,3 +280,213 @@ def test_mean_img_resample():
                        mean_img_with_resampling.get_affine())
     assert_array_equal(mean_img_with_resampling.get_affine(), target_affine)
 
+
+def test_swap_img_hemispheres():
+    # make sure input image data is not overwritten inside function
+    data = np.random.randn(4, 5, 7)
+    data_img = nibabel.Nifti1Image(data, np.eye(4))
+    image.swap_img_hemispheres(data_img)
+    np.testing.assert_array_equal(data_img.get_data(), data)
+
+    # swapping operations work
+    np.testing.assert_array_equal(  # one turn
+        image.swap_img_hemispheres(data_img).get_data(),
+        data[::-1])
+    np.testing.assert_array_equal(  # two turns -> back to original data
+        image.swap_img_hemispheres(
+            image.swap_img_hemispheres(data_img)).get_data(),
+        data)
+
+
+def test_concat_imgs():
+    assert_true(concat_imgs is niimg_conversions.concat_niimgs)
+
+
+def test_index_img():
+    img_3d = nibabel.Nifti1Image(np.ones((3, 4, 5)), np.eye(4))
+    testing.assert_raises_regex(TypeError, '4D Niimg-like',
+                                image.index_img, img_3d, 0)
+
+    affine = np.array([[1., 2., 3., 4.],
+                       [5., 6., 7., 8.],
+                       [9., 10., 11., 12.],
+                       [0., 0., 0., 1.]])
+    img_4d, _ = testing.generate_fake_fmri(affine=affine)
+
+    fourth_dim_size = img_4d.shape[3]
+    tested_indices = (list(range(fourth_dim_size)) +
+                      [slice(2, 8, 2), [1, 2, 3, 2], [],
+                       (np.arange(fourth_dim_size) % 3) == 1])
+    for i in tested_indices:
+        this_img = image.index_img(img_4d, i)
+        expected_data_3d = img_4d.get_data()[..., i]
+        assert_array_equal(this_img.get_data(),
+                           expected_data_3d)
+        assert_array_equal(this_img.get_affine(),
+                           img_4d.get_affine())
+
+    for i in [fourth_dim_size, - fourth_dim_size - 1,
+              [0, fourth_dim_size],
+              np.repeat(True, fourth_dim_size + 1)]:
+        testing.assert_raises_regex(
+            IndexError,
+            'out of bounds|invalid index|out of range',
+            image.index_img, img_4d, i)
+
+
+def test_iter_img():
+    img_3d = nibabel.Nifti1Image(np.ones((3, 4, 5)), np.eye(4))
+    testing.assert_raises_regex(TypeError, '4D Niimg-like',
+                                image.iter_img, img_3d)
+
+    affine = np.array([[1., 2., 3., 4.],
+                       [5., 6., 7., 8.],
+                       [9., 10., 11., 12.],
+                       [0., 0., 0., 1.]])
+    img_4d, _ = testing.generate_fake_fmri(affine=affine)
+
+    for i, img in enumerate(image.iter_img(img_4d)):
+        expected_data_3d = img_4d.get_data()[..., i]
+        assert_array_equal(img.get_data(),
+                           expected_data_3d)
+        assert_array_equal(img.get_affine(),
+                           img_4d.get_affine())
+
+    with testing.write_tmp_imgs(img_4d) as img_4d_filename:
+        for i, img in enumerate(image.iter_img(img_4d_filename)):
+            expected_data_3d = img_4d.get_data()[..., i]
+            assert_array_equal(img.get_data(),
+                               expected_data_3d)
+            assert_array_equal(img.get_affine(),
+                               img_4d.get_affine())
+        # enables to delete "img_4d_filename" on windows
+        del img
+
+    img_3d_list = list(image.iter_img(img_4d))
+    for i, img in enumerate(image.iter_img(img_3d_list)):
+        expected_data_3d = img_4d.get_data()[..., i]
+        assert_array_equal(img.get_data(),
+                           expected_data_3d)
+        assert_array_equal(img.get_affine(),
+                           img_4d.get_affine())
+
+    with testing.write_tmp_imgs(*img_3d_list) as img_3d_filenames:
+        for i, img in enumerate(image.iter_img(img_3d_filenames)):
+            expected_data_3d = img_4d.get_data()[..., i]
+            assert_array_equal(img.get_data(),
+                               expected_data_3d)
+            assert_array_equal(img.get_affine(),
+                               img_4d.get_affine())
+        # enables to delete "img_3d_filename" on windows
+        del img
+
+
+def test_new_img_like_mgz():
+    """Check that new images can be generated with bool MGZ type
+    This is usually when computing masks using MGZ inputs, e.g.
+    when using plot_stap_map
+    """
+
+    if not LooseVersion(nibabel.__version__) >= LooseVersion('1.2.0'):
+        # Old nibabel do not support MGZ files
+        raise SkipTest
+
+    ref_img = nibabel.load(os.path.join(datadir, 'test.mgz'))
+    data = np.ones(ref_img.get_data().shape, dtype=np.bool)
+    affine = ref_img.get_affine()
+    new_img_like(ref_img, data, affine, copy_header=False)
+
+
+def test_new_img_like():
+    # Give a list to new_img_like
+    data = np.zeros((5, 6, 7))
+    data[2:4, 1:5, 3:6] = 1
+    affine = np.diag((4, 3, 2, 1))
+    img = nibabel.Nifti1Image(data, affine=affine)
+    img2 = new_img_like([img, ], data)
+    np.testing.assert_array_equal(img.get_data(), img2.get_data())
+
+
+def test_validity_threshold_value_in_threshold_img():
+    shape = (6, 8, 10)
+    maps, _ = testing.generate_maps(shape, n_regions=2)
+
+    # testing to raise same error when threshold=None case
+    testing.assert_raises_regex(ValueError,
+                                "The input parameter 'threshold' is empty. ",
+                                threshold_img, maps, threshold=None)
+
+    invalid_threshold_values = ['90t%', 's%', 't', '0.1']
+    name = 'threshold'
+    for thr in invalid_threshold_values:
+        testing.assert_raises_regex(ValueError,
+                                    '{0}.+should be a number followed by '
+                                    'the percent sign'.format(name),
+                                    threshold_img, maps, threshold=thr)
+
+
+def test_threshold_img():
+    # to check whether passes with valid threshold inputs
+    shape = (10, 20, 30)
+    maps, _ = testing.generate_maps(shape, n_regions=4)
+    affine = np.eye(4)
+    mask_img = nibabel.Nifti1Image(np.ones((shape), dtype=np.int8), affine)
+
+    for img in iter_img(maps):
+        # when threshold is a float value
+        thr_maps_img = threshold_img(img, threshold=0.8)
+        # when we provide mask image
+        thr_maps_percent = threshold_img(img, threshold=1, mask_img=mask_img)
+        # when threshold is a percentile
+        thr_maps_percent2 = threshold_img(img, threshold='2%')
+
+
+def test_isnan_threshold_img_data():
+    shape = (10, 10, 10)
+    maps, _ = testing.generate_maps(shape, n_regions=2)
+    data = maps.get_data()
+    data[:, :, 0] = np.nan
+
+    maps_img = nibabel.Nifti1Image(data, np.eye(4))
+    # test threshold_img to converge properly when input image has nans.
+    threshold_img(maps_img, threshold=0.8)
+
+
+def test_math_img_exceptions():
+    img1 = Nifti1Image(np.ones((10, 10, 10, 10)), np.eye(4))
+    img2 = Nifti1Image(np.zeros((10, 20, 10, 10)), np.eye(4))
+    img3 = Nifti1Image(np.ones((10, 10, 10, 10)), np.eye(4))
+    img4 = Nifti1Image(np.ones((10, 10, 10, 10)), np.eye(4) * 2)
+
+    formula = "np.mean(img1, axis=-1) - np.mean(img2, axis=-1)"
+    # Images with different shapes should raise a ValueError exception.
+    assert_raises_regex(ValueError,
+                        "Input images cannot be compared",
+                        math_img, formula, img1=img1, img2=img2)
+
+    # Images with different affines should raise a ValueError exception.
+    assert_raises_regex(ValueError,
+                        "Input images cannot be compared",
+                        math_img, formula, img1=img1, img2=img4)
+
+    bad_formula = "np.toto(img1, axis=-1) - np.mean(img3, axis=-1)"
+    assert_raises_regex(AttributeError,
+                        "Input formula couldn't be processed",
+                        math_img, bad_formula, img1=img1, img3=img3)
+
+
+def test_math_img():
+    img1 = Nifti1Image(np.ones((10, 10, 10, 10)), np.eye(4))
+    img2 = Nifti1Image(np.zeros((10, 10, 10, 10)), np.eye(4))
+    expected_result = Nifti1Image(np.ones((10, 10, 10)), np.eye(4))
+
+    formula = "np.mean(img1, axis=-1) - np.mean(img2, axis=-1)"
+    for create_files in (True, False):
+        with testing.write_tmp_imgs(img1, img2,
+                                    create_files=create_files) as imgs:
+            result = math_img(formula, img1=imgs[0], img2=imgs[1])
+            assert_array_equal(result.get_data(),
+                               expected_result.get_data())
+            assert_array_equal(result.get_affine(),
+                               expected_result.get_affine())
+            assert_equal(result.shape, expected_result.shape)

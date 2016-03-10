@@ -5,12 +5,15 @@
 PYTHON ?= python
 CYTHON ?= cython
 NOSETESTS ?= nosetests
+NOSETESTS_OPTIONS := $(shell pip list | grep nose-timer > /dev/null && \
+                       echo '--with-timer --timer-top-n 50')
 CTAGS ?= ctags
 
 all: clean test doc-noplot
 
 clean-pyc:
 	find . -name "*.pyc" | xargs rm -f
+	find . -name "__pycache__" | xargs rm -rf
 
 clean-so:
 	find . -name "*.so" | xargs rm -f
@@ -29,11 +32,10 @@ inplace:
 	$(PYTHON) setup.py build_ext -i
 
 test-code:
-	$(NOSETESTS) -s nilearn 
+	$(NOSETESTS) -s nilearn $(NOSETESTS_OPTIONS)
 test-doc:
 	$(NOSETESTS) -s --with-doctest --doctest-tests --doctest-extension=rst \
-	--doctest-extension=inc --doctest-fixtures=_fixture doc/ \
-	
+	--doctest-extension=inc --doctest-fixtures=_fixture `find doc/ -name '*.rst'`
 
 test-coverage:
 	rm -rf coverage .coverage
@@ -53,18 +55,15 @@ ctags:
 	# Install with: sudo apt-get install exuberant-ctags
 	$(CTAGS) -R *
 
-.PHONY : doc
-doc:
+.PHONY : doc-plot
+doc-plot:
 	make -C doc html
 
-.PHONY : doc-noplot
-doc-noplot:
+.PHONY : doc
+doc:
 	make -C doc html-noplot
 
 .PHONY : pdf
 pdf:
 	make -C doc pdf
 
-install: 
-	cd doc && make install
- 

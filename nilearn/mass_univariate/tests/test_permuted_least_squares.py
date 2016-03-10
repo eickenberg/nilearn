@@ -3,7 +3,6 @@ Tests for the permuted_ols function.
 
 """
 # Author: Virgile Fritsch, <virgile.fritsch@inria.fr>, Feb. 2014
-import nose
 import numpy as np
 from scipy import stats
 from sklearn.utils import check_random_state
@@ -54,7 +53,7 @@ def get_tvalue_with_alternative_library(tested_vars, target_vars, covars=None):
     test_matrix = np.array([[1.] + [0.] * n_covars])
 
     ### t-values computation
-    try:  # try with statsmodels is available (more concise)
+    try:  # try with statsmodels if available (more concise)
         from statsmodels.regression.linear_model import OLS
         t_values = np.empty((n_targets, n_regressors))
         for i in range(n_targets):
@@ -101,7 +100,7 @@ def test_t_score_with_covars_and_normalized_design_nocovar(random_state=0):
     var1 = np.ones((n_samples, 1)) / np.sqrt(n_samples)
     var2 = rng.randn(n_samples, 1)
     var2 = var2 / np.sqrt(np.sum(var2 ** 2, 0))  # normalize
-    # compute t-scores with nilearn's routine
+    # compute t-scores with nilearn routine
     t_val_own = _t_score_with_covars_and_normalized_design(var1, var2)
     # compute t-scores with linalg or statsmodels
     t_val_alt = get_tvalue_with_alternative_library(var1, var2)
@@ -123,7 +122,7 @@ def test_t_score_with_covars_and_normalized_design_withcovar(random_state=0):
     covars = np.eye(n_samples, 3)  # covars is orthogonal
     covars[3] = -1  # covars is orthogonal to var1
     covars = orthonormalize_matrix(covars)
-    # nilearn's t-score
+    # nilearn t-score
     own_score = _t_score_with_covars_and_normalized_design(var1, var2, covars)
     # compute t-scores with linalg or statmodels
     ref_score = get_tvalue_with_alternative_library(var1, var2, covars)
@@ -137,7 +136,7 @@ def test_permuted_ols_check_h0_noeffect_labelswap(random_state=0):
     n_samples = 100
     # create dummy design with no effect
     target_var = rng.randn(n_samples, 1)
-    tested_var = np.arange(n_samples).reshape((-1, 1))
+    tested_var = np.arange(n_samples, dtype='f8').reshape((-1, 1))
     tested_var_not_centered = tested_var.copy()
     tested_var -= tested_var.mean(0)  # centered
     # permuted OLS
@@ -441,7 +440,7 @@ def test_permuted_ols_intercept_nocovar_multivariate(random_state=0):
     # create design
     target_vars = rng.randn(n_samples, n_targets)
     tested_vars = np.ones((n_samples, 1))
-    # compute t-scores with nilearn's routine
+    # compute t-scores with nilearn routine
     ref_scores = get_tvalue_with_alternative_library(tested_vars, target_vars)
     # permuted OLS
     _, own_scores, _ = permuted_ols(
@@ -455,8 +454,7 @@ def test_permuted_ols_intercept_nocovar_multivariate(random_state=0):
     assert_array_almost_equal(own_scores, own_scores_intercept, decimal=6)
 
 
-def test_permuted_ols_intercept_withcovar_multivariate(
-    random_state=0):
+def test_permuted_ols_intercept_withcovar_multivariate(random_state=0):
     rng = check_random_state(random_state)
     # design parameters
     n_samples = 50
@@ -483,6 +481,8 @@ def test_permuted_ols_intercept_withcovar_multivariate(
 
 ### Test one-sided versus two-sided ###########################################
 def test_sided_test(random_state=0):
+    """Check that a positive effect is always better recovered with one-sided.
+    """
     rng = check_random_state(random_state)
     # design parameters
     n_samples = 50
@@ -494,12 +494,41 @@ def test_sided_test(random_state=0):
     neg_log_pvals_onesided, _, _ = permuted_ols(
         tested_var, target_var, model_intercept=False,
         two_sided_test=False, n_perm=100, random_state=random_state)
+    # two-sided
+    neg_log_pvals_twosided, _, _ = permuted_ols(
+        tested_var, target_var, model_intercept=False,
+        two_sided_test=True, n_perm=100, random_state=random_state)
+
+    positive_effect_location = neg_log_pvals_onesided > 1
+    assert_equal(
+        np.sum(neg_log_pvals_twosided[positive_effect_location]
+               - neg_log_pvals_onesided[positive_effect_location] > 0),
+        0)
+
+
+def test_sided_test2(random_state=0):
+    """Check that two-sided can actually recover positive and negative effects.
+    """
+    # create design
+    target_var1 = np.arange(0, 10).reshape((-1, 1))  # positive effect
+    target_var = np.hstack((target_var1, - target_var1))
+
+    tested_var = np.arange(0, 20, 2)
+    # permuted OLS
+    # one-sided
+    neg_log_pvals_onesided, _, _ = permuted_ols(
+        tested_var, target_var, model_intercept=False,
+        two_sided_test=False, n_perm=100, random_state=random_state)
+    # one-sided (other side)
+    neg_log_pvals_onesided2, _, _ = permuted_ols(
+        tested_var, -target_var, model_intercept=False,
+        two_sided_test=False, n_perm=100, random_state=random_state)
     # two-sdided
     neg_log_pvals_twosided, _, _ = permuted_ols(
         tested_var, target_var, model_intercept=False,
         two_sided_test=True, n_perm=100, random_state=random_state)
-    assert_equal(
-        np.sum(neg_log_pvals_twosided - neg_log_pvals_onesided > 0), 0)
 
-if __name__ == '__main__':
-    nose.run(argv=['', __file__])
+    assert_array_almost_equal(neg_log_pvals_onesided[0],
+                              neg_log_pvals_onesided2[0][::-1])
+    assert_array_almost_equal(neg_log_pvals_onesided + neg_log_pvals_onesided2,
+                              neg_log_pvals_twosided)

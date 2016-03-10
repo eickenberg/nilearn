@@ -4,7 +4,9 @@ Validation and conversion utilities for numpy.
 # Author: Gael Varoquaux, Alexandre Abraham, Philippe Gervais
 # License: simplified BSD
 
+import csv
 import numpy as np
+from .compat import _basestring
 
 
 def _asarray(arr, dtype=None, order=None):
@@ -124,3 +126,47 @@ def as_ndarray(arr, copy=False, dtype=None, order='K'):
         raise ValueError("Type not handled: %s" % arr.__class__)
 
     return ret
+
+
+def csv_to_array(csv_path, delimiters=' \t,;', **kwargs):
+    """Read a CSV file by trying to guess its delimiter
+
+    Parameters
+    ----------
+    csv_path: string
+        Path of the CSV file to load.
+
+    delimiters: string
+        Each character of the delimiters string is a potential delimiters for
+        the CSV file.
+
+    kwargs: keyword arguments
+        The additional keyword arguments are passed to numpy.genfromtxt when
+        loading the CSV.
+
+    Returns
+    -------
+    array: numpy.ndarray
+        An array containing the data loaded from the CSV file.
+    """
+    if not isinstance(csv_path, _basestring):
+        raise TypeError('CSV must be a file path. Got a CSV of type: %s' %
+                        type(csv_path))
+
+    try:
+        # First, we try genfromtxt which works in most cases.
+        array = np.genfromtxt(csv_path, loose=False, **kwargs)
+    except ValueError:
+        # There was an error during the conversion to numpy array, probably
+        # because the delimiter is wrong.
+        # In that case, we try to guess the delimiter.
+        try:
+            with open(csv_path, 'r') as csv_file:
+                dialect = csv.Sniffer().sniff(csv_file.readline(), delimiters)
+        except csv.Error as e:
+            raise TypeError(
+                'Could not read CSV file [%s]: %s' % (csv_path, e.args[0]))
+
+        array = np.genfromtxt(csv_path, delimiter=dialect.delimiter, **kwargs)
+
+    return array
